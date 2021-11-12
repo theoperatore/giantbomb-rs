@@ -20,10 +20,11 @@ async fn ping_returns_200_ok() {
 
 // Launch our application in the background with any open port
 fn spawn_app() -> String {
+  let fake_gb_token = "not-real-token";
   let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
   let port = listener.local_addr().unwrap().port();
 
-  let server = giantbomb_rs::srv(listener).expect("Failed to create server");
+  let server = giantbomb_rs::srv(listener, fake_gb_token).expect("Failed to create server");
   let _ = tokio::spawn(server);
 
   format!("http://127.0.0.1:{}", port)
