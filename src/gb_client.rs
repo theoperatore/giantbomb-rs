@@ -1,7 +1,9 @@
 use rand::Rng;
-use reqwest::Client;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_tracing::TracingMiddleware;
 use serde::{Deserialize, Serialize};
-use tracing::Instrument;
+
+type Error = Box<dyn std::error::Error + Send + Sync>;
 
 // required by GiantBomb otherwise the api fails with: Bad Content type
 const USER_AGENT: &str = "alorg-game-of-the-day-giantbomb";
@@ -94,25 +96,31 @@ fn random(max: i64) -> i64 {
 }
 
 #[tracing::instrument(name = "Max games query", skip(client, token))]
-async fn get_max_games(client: &Client, token: &str) -> Result<i64, reqwest::Error> {
+async fn get_max_games(client: &ClientWithMiddleware, token: &str) -> Result<i64, Error> {
   let url = format!(
     "https://www.giantbomb.com/api/games/?api_key={}&limit=1&field_list=api_detail_url&format=json",
     token
   );
   let response = client
     .get(url)
-    .header("User-Agent", USER_AGENT)
     .send()
-    .await?
-    .json::<GiantBombResponse>()
     .await
-    .map_err(|e| reqwest::Error::from(e))?;
+    .and_then(|r| match r.error_for_status() {
+      Ok(res) => Ok(res),
+      Err(err) => Err(reqwest_middleware::Error::Reqwest(err)),
+    })?
+    .json::<GiantBombResponse>()
+    .await?;
 
   Ok(response.number_of_total_results)
 }
 
 #[tracing::instrument(name = "Game uri query", skip(client, token, idx), fields(game_idx = %idx))]
-async fn get_game_uri(client: &Client, token: &str, idx: i64) -> Result<String, reqwest::Error> {
+async fn get_game_uri(
+  client: &ClientWithMiddleware,
+  token: &str,
+  idx: i64,
+) -> Result<String, Error> {
   let url = format!(
     "https://www.giantbomb.com/api/games/?api_key={}&limit=1&format=json&offset={}&field_list=api_detail_url",
     token, idx
@@ -120,9 +128,12 @@ async fn get_game_uri(client: &Client, token: &str, idx: i64) -> Result<String, 
 
   let response = client
     .get(url)
-    .header("User-Agent", USER_AGENT)
     .send()
-    .await?
+    .await
+    .and_then(|r| match r.error_for_status() {
+      Ok(res) => Ok(res),
+      Err(err) => Err(reqwest_middleware::Error::Reqwest(err)),
+    })?
     .json::<GiantBombResponse>()
     .await?;
 
@@ -134,7 +145,11 @@ async fn get_game_uri(client: &Client, token: &str, idx: i64) -> Result<String, 
 }
 
 #[tracing::instrument(name = "Game details query", skip(client, token, uri), fields(giantbomb_uri = %uri))]
-async fn get_game_details(client: &Client, token: &str, uri: &str) -> Result<Game, reqwest::Error> {
+async fn get_game_details(
+  client: &ClientWithMiddleware,
+  token: &str,
+  uri: &str,
+) -> Result<Game, Error> {
   let url = format!(
     "{}?api_key={}&format=json&field_list={}",
     uri,
@@ -161,26 +176,31 @@ async fn get_game_details(client: &Client, token: &str, uri: &str) -> Result<Gam
     .join(",")
   );
 
-  let json_span = tracing::info_span!("Game detail deserialization");
   let response = client
     .get(url)
-    .header("User-Agent", USER_AGENT)
     .send()
-    .await?
-    .json::<GiantBombGameResponse>()
-    .instrument(json_span)
     .await
-    .map_err(|e| {
-      tracing::error!("Error fetching game_details: {:?}", e);
-      reqwest::Error::from(e)
-    })?;
+    .and_then(|r| match r.error_for_status() {
+      Ok(res) => Ok(res),
+      Err(err) => Err(reqwest_middleware::Error::Reqwest(err)),
+    })?
+    .json::<GiantBombGameResponse>()
+    .await?;
 
   Ok(response.results)
 }
 
 #[tracing::instrument(name = "Get random game", skip(token))]
-pub async fn get_random_game(token: &str) -> Result<Game, reqwest::Error> {
-  let client = reqwest::Client::new();
+pub async fn get_random_game(token: &str) -> Result<Game, Error> {
+  let client = ClientBuilder::new(
+    reqwest::Client::builder()
+      .user_agent(USER_AGENT)
+      .build()
+      .expect("failed to build reqwest client"),
+  )
+  .with(TracingMiddleware)
+  .build();
+
   let max_games = get_max_games(&client, token).await?;
 
   let idx = random(max_games);
