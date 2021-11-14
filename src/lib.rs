@@ -30,7 +30,7 @@ async fn random_game(ctx: web::Data<AppContext>) -> impl Responder {
 
 #[tracing::instrument(name = "Ping handler", skip(_req))]
 async fn ping(_req: HttpRequest) -> impl Responder {
-  HttpResponse::Ok()
+  HttpResponse::NoContent()
 }
 
 pub fn srv(listener: TcpListener, gb_token: &str) -> Result<Server, std::io::Error> {
