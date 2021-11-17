@@ -11,17 +11,22 @@ struct AppContext {
 }
 
 #[derive(Serialize)]
-struct ErrorResponse {
+struct GameResponse {
+  game: Option<gb_client::Game>,
   message: String,
 }
 
 async fn random_game(ctx: web::Data<AppContext>) -> impl Responder {
   let token = &ctx.gb_token;
   match gb_client::get_random_game(token).await {
-    Ok(game) => HttpResponse::Ok().json(game),
+    Ok(game) => HttpResponse::Ok().json(GameResponse {
+      game: Some(game),
+      message: "OK".to_string(),
+    }),
     Err(err) => {
       tracing::error!("Error fetching game: {}", err);
-      HttpResponse::BadGateway().json(ErrorResponse {
+      HttpResponse::BadGateway().json(GameResponse {
+        game: None,
         message: "Failed to get random game".to_string(),
       })
     }

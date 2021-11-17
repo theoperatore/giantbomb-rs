@@ -8,7 +8,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 // required by GiantBomb otherwise the api fails with: Bad Content type
 const USER_AGENT: &str = "alorg-game-of-the-day-giantbomb";
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
 struct GameImage {
   original_url: Option<String>,
   super_url: Option<String>,
@@ -21,7 +21,7 @@ struct GameImage {
   tiny_url: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
 struct Characteristic {
   api_detail_url: String,
   id: i32,
@@ -30,7 +30,7 @@ struct Characteristic {
   abbreviation: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Default, PartialEq)]
 pub struct Game {
   id: i32,
   guid: String,
@@ -51,12 +51,12 @@ pub struct Game {
   themes: Option<Vec<Characteristic>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct DetailUrl {
   api_detail_url: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct GiantBombResponse {
   // I can't remember what exactly these values can be, but just someting that isn't OK will be enough
   // will be either "OK" | "ERROR"
@@ -70,7 +70,7 @@ struct GiantBombResponse {
   results: Vec<DetailUrl>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct GiantBombGameResponse {
   // I can't remember what exactly these values can be, but just someting that isn't OK will be enough
   // will be either "OK" | "ERROR"
@@ -84,22 +84,20 @@ struct GiantBombGameResponse {
   results: Game,
 }
 
-#[derive(Deserialize, Debug)]
-struct DatasResponse {
-  status: String,
-  result: Game,
-}
-
 fn random(max: i64) -> i64 {
   // get random int between 0 and (max - 1)
   rand::thread_rng().gen_range(0..max)
 }
 
 #[tracing::instrument(name = "Max games query", skip(client, token))]
-async fn get_max_games(client: &ClientWithMiddleware, token: &str) -> Result<i64, Error> {
+async fn get_max_games(
+  client: &ClientWithMiddleware,
+  token: &str,
+  api: &str,
+) -> Result<i64, Error> {
   let url = format!(
-    "https://www.giantbomb.com/api/games/?api_key={}&limit=1&field_list=api_detail_url&format=json",
-    token
+    "{}/api/games/?api_key={}&limit=1&format=json&field_list=api_detail_url",
+    api, token
   );
   let response = client
     .get(url)
@@ -120,10 +118,11 @@ async fn get_game_uri(
   client: &ClientWithMiddleware,
   token: &str,
   idx: i64,
+  api: &str,
 ) -> Result<String, Error> {
   let url = format!(
-    "https://www.giantbomb.com/api/games/?api_key={}&limit=1&format=json&offset={}&field_list=api_detail_url",
-    token, idx
+    "{}/api/games/?api_key={}&limit=1&format=json&offset={}&field_list=api_detail_url",
+    api, token, idx
   );
 
   let response = client
@@ -192,6 +191,11 @@ async fn get_game_details(
 
 #[tracing::instrument(name = "Get random game", skip(token))]
 pub async fn get_random_game(token: &str) -> Result<Game, Error> {
+  fetch_game(token, "https://www.giantbomb.com").await
+}
+
+// so that I can test the client with a mock uri
+async fn fetch_game(token: &str, gb_api_url: &str) -> Result<Game, Error> {
   let client = ClientBuilder::new(
     reqwest::Client::builder()
       .user_agent(USER_AGENT)
@@ -201,14 +205,226 @@ pub async fn get_random_game(token: &str) -> Result<Game, Error> {
   .with(TracingMiddleware)
   .build();
 
-  let max_games = get_max_games(&client, token).await?;
+  let max_games = get_max_games(&client, token, gb_api_url).await?;
 
   let idx = random(max_games);
 
   // this game uri has a HUGE detail payload
   // let game_uri = "https://www.giantbomb.com/api/game/3030-1156/";
-  let game_uri = get_game_uri(&client, token, idx).await?;
+  let game_uri = get_game_uri(&client, token, idx, gb_api_url).await?;
 
   let game = get_game_details(&client, token, &game_uri).await?;
   Ok(game)
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::gb_client::fetch_game;
+  use crate::gb_client::DetailUrl;
+  use crate::gb_client::Game;
+  use crate::gb_client::GiantBombGameResponse;
+  use crate::gb_client::GiantBombResponse;
+  use wiremock::matchers::{method, path, query_param};
+  use wiremock::ResponseTemplate;
+  use wiremock::{Mock, MockServer};
+
+  #[tokio::test]
+  async fn throws_error_when_max_games_returns_non_ok() {
+    // Arrange
+    let mock_gb_server = MockServer::start().await;
+    let _mock_guard = Mock::given(method("GET"))
+      .and(path("/api/games/"))
+      .respond_with(ResponseTemplate::new(500))
+      .named("GET max games")
+      .expect(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    // Act
+    let result = fetch_game("fake_token", &mock_gb_server.uri()).await;
+
+    // Assert
+    assert_eq!(result.is_err(), true);
+  }
+
+  #[tokio::test]
+  async fn throws_error_when_game_uri_returns_non_ok() {
+    // Arrange
+    let mock_gb_server = MockServer::start().await;
+    let max_games_response = GiantBombResponse {
+      error: String::from("OK"),
+      version: String::from("1"),
+      limit: 1,
+      offset: 0,
+      number_of_page_results: 1,
+      number_of_total_results: 1,
+      status_code: 200,
+      results: Vec::new(),
+    };
+    let _mock_guard = Mock::given(method("GET"))
+      .and(path("/api/games/"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(max_games_response))
+      .named("GET max games")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    let _mock_guard_2 = Mock::given(method("GET"))
+      .and(path("/api/games/"))
+      .and(query_param("limit", "1"))
+      .and(query_param("offset", "0"))
+      .respond_with(ResponseTemplate::new(500))
+      .named("GET games uri")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    // Act
+    let result = fetch_game("fake_token", &mock_gb_server.uri()).await;
+
+    // Assert
+    assert_eq!(result.is_err(), true);
+  }
+
+  #[tokio::test]
+  async fn throws_error_when_game_details_returns_non_ok() {
+    // Arrange
+    let mock_gb_server = MockServer::start().await;
+    let max_games_response = GiantBombResponse {
+      error: String::from("OK"),
+      version: String::from("1"),
+      limit: 1,
+      offset: 0,
+      number_of_page_results: 1,
+      number_of_total_results: 1,
+      status_code: 200,
+      results: Vec::new(),
+    };
+
+    let game_uri_response = GiantBombResponse {
+      error: String::from("OK"),
+      version: String::from("1"),
+      limit: 1,
+      offset: 0,
+      number_of_page_results: 1,
+      number_of_total_results: 1,
+      status_code: 200,
+      results: vec![DetailUrl {
+        api_detail_url: format!("{}/api/game/123", mock_gb_server.uri()),
+      }],
+    };
+
+    let _mock_guard = Mock::given(method("GET"))
+      .and(path("/api/games/"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(max_games_response))
+      .named("GET max games")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    let _mock_guard_2 = Mock::given(method("GET"))
+      .and(path("/api/games/"))
+      .and(query_param("limit", "1"))
+      .and(query_param("offset", "0"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(game_uri_response))
+      .named("GET games uri")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    let _mock_guard_3 = Mock::given(method("GET"))
+      .and(path("/api/game/123"))
+      .respond_with(ResponseTemplate::new(500))
+      .named("GET game details")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    // Act
+    let result = fetch_game("fake_token", &mock_gb_server.uri()).await;
+
+    // Assert
+    assert_eq!(result.is_err(), true);
+  }
+
+  #[tokio::test]
+  async fn returns_game_details() {
+    // Arrange
+    let mock_gb_server = MockServer::start().await;
+    let max_games_response = GiantBombResponse {
+      error: String::from("OK"),
+      version: String::from("1"),
+      limit: 1,
+      offset: 0,
+      number_of_page_results: 1,
+      number_of_total_results: 1,
+      status_code: 200,
+      results: Vec::new(),
+    };
+
+    let game_uri_response = GiantBombResponse {
+      error: String::from("OK"),
+      version: String::from("1"),
+      limit: 1,
+      offset: 0,
+      number_of_page_results: 1,
+      number_of_total_results: 1,
+      status_code: 200,
+      results: vec![DetailUrl {
+        api_detail_url: format!("{}/api/game/123", mock_gb_server.uri()),
+      }],
+    };
+
+    let game_response = GiantBombGameResponse {
+      error: String::from("OK"),
+      version: String::from("1"),
+      limit: 1,
+      offset: 0,
+      number_of_page_results: 1,
+      number_of_total_results: 1,
+      status_code: 200,
+      results: Game::default(),
+    };
+
+    let _mock_guard = Mock::given(method("GET"))
+      .and(path("/api/games/"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(max_games_response))
+      .named("GET max games")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    let _mock_guard_2 = Mock::given(method("GET"))
+      .and(path("/api/games/"))
+      .and(query_param("limit", "1"))
+      .and(query_param("offset", "0"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(game_uri_response))
+      .named("GET games uri")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    let _mock_guard_3 = Mock::given(method("GET"))
+      .and(path("/api/game/123"))
+      .respond_with(ResponseTemplate::new(200).set_body_json(game_response))
+      .named("GET game details")
+      .expect(1)
+      .up_to_n_times(1)
+      .mount_as_scoped(&mock_gb_server)
+      .await;
+
+    // Act
+    let result = fetch_game("fake_token", &mock_gb_server.uri()).await;
+
+    // Assert
+    assert_eq!(result.is_err(), false);
+    assert_eq!(result.unwrap(), Game::default());
+  }
 }

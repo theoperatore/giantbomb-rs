@@ -34,4 +34,5 @@ opentelemetry-jaeger = { version = "0.13.0", features = ["tokio"] }
 
 [dev-dependencies]
 actix-rt = "2"
-tokio = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+wiremock = "0.5.8"
